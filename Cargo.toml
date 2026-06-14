@@ -1,0 +1,11 @@
+[package]
+name = "vtpm-to-svsm-blk"
+version = "0.1.0"
+edition = "2024"
+authors = ["Arun Menon <armenon@redhat.com>"]
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+aes-gcm = "0.10"
+rand = "0.8"
+
