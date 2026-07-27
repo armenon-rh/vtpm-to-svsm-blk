@@ -7,10 +7,11 @@ use std::io::{Write, ErrorKind};
 use std::process;
 use std::path::PathBuf;
 
+
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Encrypts a vTPM state file into an SVSMvTPM image format")]
+#[command(author, version, about = "Encrypts a vTPM state file into SVSMvTPM or CocoonFS formats")]
 struct Args {
-    /// The 32-byte secret key
+    /// The 32-byte secret key file used to encrypt/format the volume
     #[arg(short = 'k', long = "key")]
     key_file: PathBuf,
 
@@ -21,6 +22,14 @@ struct Args {
     /// Output directory path to the image file
     #[arg(short = 'o', long = "output")]
     output_dir: Option<PathBuf>,
+
+    /// Format and encrypt as a native CocoonFS image instead of legacy SVSMvTPM raw format
+    #[arg(short = 'c', long = "cocoonfs")]
+    cocoonfs: bool,
+
+    /// Unique Resource ID (KBS Path) to store in the CocoonFS unencrypted header
+    #[arg(short = 'r', long = "resource-id")]
+    resource_id: Option<String>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
