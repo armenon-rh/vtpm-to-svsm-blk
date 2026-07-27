@@ -8,4 +8,4 @@ authors = ["Arun Menon <armenon@redhat.com>"]
 clap = { version = "4.4", features = ["derive"] }
 aes-gcm = "0.10"
 rand = "0.8"
-
+hex = "0.4"
