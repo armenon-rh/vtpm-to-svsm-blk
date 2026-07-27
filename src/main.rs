@@ -7,6 +7,10 @@ use std::io::{Write, ErrorKind};
 use std::process::{self, Command};
 use std::path::PathBuf;
 
+// Standardized UUID Constants used to route and index metadata blocks in the header
+const UUID_SECRET_STORAGE: &str = "bc27ddb0-0b61-4fa3-979a-ca81f4a476bc";
+const UUID_SESSION_NONCE: &str = "aabbccdd-1122-3344-5566-77889900aabb";
+
 /// Dynamically locates the compiled cocoonfs binary from the workspace sibling target folders
 /// or falls back to the system PATH.
 fn find_cocoonfs_binary() -> PathBuf {
@@ -169,6 +173,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ]);
         run_command(cmd, "Writing state to Inode 16")?;
         println!("[+] Staged and encrypted state file successfully!");
+
+        // Temporary file paths for offline metadata injection
+        let temp_route_file = PathBuf::from("./tmp_route.bin");
+        let temp_nonce_file = PathBuf::from("./tmp_nonce.bin");
+
+        // 3. Inject Routing & Identity Block under UUID_SECRET_STORAGE offline (inherently keyless)
+        let kbs_path = args.resource_id.unwrap_or_else(|| "default/vtpm/state_key".to_string());
+        println!("[*] Injecting routing block: '{}'...", kbs_path);
+        fs::write(&temp_route_file, kbs_path.as_bytes())?;
+
+        let mut cmd = Command::new(&cocoonfs_bin);
+        cmd.args(&[
+            "-f",
+            "--image", output_filename.to_str().unwrap(),
+            "aux-fs-metadata",
+            "edit", // Access the nested edit subcommands
+            "add-entry",
+            UUID_SECRET_STORAGE,
+            "--input-file", temp_route_file.to_str().unwrap(),
+        ]);
+        let route_res = run_command(cmd, "Injecting routing block");
+        let _ = fs::remove_file(&temp_route_file); // Ensure cleanup
+        route_res?;
+
+        // 4. Inject 16-byte initial random boot nonce under UUID_SESSION_NONCE offline (inherently keyless)
+        let mut initial_nonce = [0u8; 16];
+        thread_rng().fill_bytes(&mut initial_nonce);
+        let nonce_hex = hex::encode(initial_nonce);
+        println!("[*] Injecting initial boot nonce: '{}'...", nonce_hex);
+        fs::write(&temp_nonce_file, &initial_nonce)?;
+
+        let mut cmd = Command::new(&cocoonfs_bin);
+        cmd.args(&[
+            "-f",
+            "--image", output_filename.to_str().unwrap(),
+            "aux-fs-metadata",
+            "edit", // Access the nested edit subcommands
+            "add-entry",
+            UUID_SESSION_NONCE,
+            "--input-file", temp_nonce_file.to_str().unwrap(),
+        ]);
+        let nonce_res = run_command(cmd, "Injecting initial session nonce");
+        let _ = fs::remove_file(&temp_nonce_file); // Ensure cleanup
+        nonce_res?;
 
         println!("\n[✓] SUCCESS: CocoonFS image initialized and secured!");
         println!("=====================================================================");
