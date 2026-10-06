@@ -11,6 +11,55 @@ use std::path::PathBuf;
 const UUID_SECRET_STORAGE: &str = "bc27ddb0-0b61-4fa3-979a-ca81f4a476bc";
 const UUID_SESSION_NONCE: &str = "aabbccdd-1122-3344-5566-77889900aabb";
 
+/// Versioned binary header stored under UUID_SESSION_NONCE in CocoonFS AuxFsMetadata
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AntiReplayHeader {
+    pub version: u8,
+    pub flags: u8,
+    pub boot_counter: u64,
+    pub nonce: [u8; 16],
+}
+
+impl AntiReplayHeader {
+    pub fn new(nonce: [u8; 16]) -> Self {
+        Self {
+            version: 1,
+            flags: 0,
+            boot_counter: 1,
+            nonce,
+        }
+    }
+
+    pub fn to_bytes(&self) -> [u8; 26] {
+        let mut buf = [0u8; 26];
+        buf[0] = self.version;
+        buf[1] = self.flags;
+        buf[2..10].copy_from_slice(&self.boot_counter.to_le_bytes());
+        buf[10..26].copy_from_slice(&self.nonce);
+        buf
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() >= 26 {
+            Some(Self {
+                version: bytes[0],
+                flags: bytes[1],
+                boot_counter: u64::from_le_bytes(bytes[2..10].try_into().ok()?),
+                nonce: bytes[10..26].try_into().ok()?,
+            })
+        } else if bytes.len() >= 16 {
+            Some(Self {
+                version: 1,
+                flags: 0,
+                boot_counter: 1,
+                nonce: bytes[..16].try_into().ok()?,
+            })
+        } else {
+            None
+        }
+    }
+}
+
 /// Dynamically locates the compiled cocoonfs binary from the workspace sibling target folders
 /// or falls back to the system PATH.
 fn find_cocoonfs_binary() -> PathBuf {
@@ -52,6 +101,10 @@ struct Args {
     /// Unique Resource ID (KBS Path) to store in the CocoonFS unencrypted header
     #[arg(short = 'r', long = "resource-id")]
     resource_id: Option<String>,
+
+    /// VM ID (e.g. "vm-101", UUID). If provided, sets resource_id to "default/vtpm/<vmid>"
+    #[arg(long = "vmid")]
+    vmid: Option<String>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -179,7 +232,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let temp_nonce_file = PathBuf::from("./tmp_nonce.bin");
 
         // 3. Inject Routing & Identity Block under UUID_SECRET_STORAGE offline (inherently keyless)
-        let kbs_path = args.resource_id.unwrap_or_else(|| "default/vtpm/state_key".to_string());
+        let kbs_path = if let Some(ref res_id) = args.resource_id {
+            res_id.clone()
+        } else if let Some(ref vmid) = args.vmid {
+            format!("default/vtpm/{}", vmid)
+        } else {
+            "default/vtpm/state_key".to_string()
+        };
         println!("[*] Injecting routing block: '{}'...", kbs_path);
         fs::write(&temp_route_file, kbs_path.as_bytes())?;
 
@@ -197,12 +256,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = fs::remove_file(&temp_route_file); // Ensure cleanup
         route_res?;
 
-        // 4. Inject 16-byte initial random boot nonce under UUID_SESSION_NONCE offline (inherently keyless)
+        // 4. Inject versioned initial boot nonce and monotonic counter under UUID_SESSION_NONCE offline
         let mut initial_nonce = [0u8; 16];
         thread_rng().fill_bytes(&mut initial_nonce);
         let nonce_hex = hex::encode(initial_nonce);
-        println!("[*] Injecting initial boot nonce: '{}'...", nonce_hex);
-        fs::write(&temp_nonce_file, &initial_nonce)?;
+
+        let anti_replay_hdr = AntiReplayHeader::new(initial_nonce);
+        let header_bytes = anti_replay_hdr.to_bytes();
+
+        println!(
+            "[*] Injecting anti-replay header (v{}, counter={}): '{}'...",
+            anti_replay_hdr.version, anti_replay_hdr.boot_counter, nonce_hex
+        );
+        fs::write(&temp_nonce_file, &header_bytes)?;
 
         let mut cmd = Command::new(&cocoonfs_bin);
         cmd.args(&[
@@ -219,6 +285,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         nonce_res?;
 
         println!("\n[✓] SUCCESS: CocoonFS image initialized and secured!");
+        println!("=====================================================================");
+        println!("  Target Image:     {:?}", output_filename);
+        println!("  VM Resource ID:   {}", kbs_path);
+        println!("  Format Version:   {}", anti_replay_hdr.version);
+        println!("  Initial Counter:  {}", anti_replay_hdr.boot_counter);
+        println!("  Initial Nonce:    {}", nonce_hex);
+        println!("---------------------------------------------------------------------");
+        println!("  To provision in Trustee KBS:");
+        println!("    1. Store secret:");
+        println!("       kbs-client --url <KBS_URL> config set-resource --path \"{}\" --resource-file {:?}", kbs_path, args.key_file);
+        println!("    2. Register initial anti-replay record with KBS:");
+        println!("       curl -X POST <KBS_URL>/kbs/v0/svsm/register-nonce \\");
+        println!("            -H \"Content-Type: application/json\" \\");
+        println!(
+            "            -d '{{\"version\": {}, \"resource_id\": \"{}\", \"boot_counter\": {}, \"nonce\": \"{}\"}}'",
+            anti_replay_hdr.version, kbs_path, anti_replay_hdr.boot_counter, nonce_hex
+        );
         println!("=====================================================================");
 
     } else {
@@ -273,4 +356,59 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_uuid_constants() {
+        assert_eq!(UUID_SECRET_STORAGE, "bc27ddb0-0b61-4fa3-979a-ca81f4a476bc");
+        assert_eq!(UUID_SESSION_NONCE, "aabbccdd-1122-3344-5566-77889900aabb");
+    }
+
+    #[test]
+    fn test_anti_replay_header_serialization() {
+        let nonce = [0x42u8; 16];
+        let hdr = AntiReplayHeader::new(nonce);
+        let bytes = hdr.to_bytes();
+        assert_eq!(bytes.len(), 26);
+        assert_eq!(bytes[0], 1); // version
+        assert_eq!(bytes[1], 0); // flags
+        assert_eq!(u64::from_le_bytes(bytes[2..10].try_into().unwrap()), 1); // counter
+        assert_eq!(&bytes[10..26], &nonce);
+
+        let parsed = AntiReplayHeader::from_bytes(&bytes).expect("failed to parse");
+        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.flags, 0);
+        assert_eq!(parsed.boot_counter, 1);
+        assert_eq!(parsed.nonce, nonce);
+    }
+
+    #[test]
+    fn test_legacy_nonce_fallback() {
+        let raw_nonce = [0x55u8; 16];
+        let parsed = AntiReplayHeader::from_bytes(&raw_nonce).expect("failed to parse legacy");
+        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.boot_counter, 1);
+        assert_eq!(parsed.nonce, raw_nonce);
+    }
+
+    #[test]
+    fn test_vmid_resolution() {
+        let resolve = |res_id: Option<&str>, vmid: Option<&str>| -> String {
+            if let Some(r) = res_id {
+                r.to_string()
+            } else if let Some(v) = vmid {
+                format!("default/vtpm/{}", v)
+            } else {
+                "default/vtpm/state_key".to_string()
+            }
+        };
+
+        assert_eq!(resolve(None, Some("vm-42")), "default/vtpm/vm-42");
+        assert_eq!(resolve(Some("custom/path/key"), Some("vm-42")), "custom/path/key");
+        assert_eq!(resolve(None, None), "default/vtpm/state_key");
+    }
 }
