@@ -2,6 +2,7 @@
 This tool
 1. encrypts the vTPM state file generated using the official TCG simulator using aes256gcm cipher.
 2. creates a disk image by joining a suitable header and the encrypted payload.
+3. If cocoonfs argument is used, formats the image with cocoonfs filesystem format. For more information, see [COCOONFS_VTPM_BLK.md](COCOONFS_VTPM_BLK.md)
 
 The header is 64 bytes long, consisting of
 - magic (8 bytes),
